@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+*.cache
+data/
+output/
+*.zip
+models/
+.idea/

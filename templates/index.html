@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentiment Analysis Platform</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-brain"></i> Sentiment Analysis</h1>
+            <p>Analyze emotions and sentiments in text with AI-powered models</p>
+        </div>
+
+        <div class="main-card">
+            <div class="nav-tabs">
+                <button class="nav-tab active" onclick="switchTab('single')">
+                    <i class="fas fa-edit"></i> Single Analysis
+                </button>
+                <button class="nav-tab" onclick="switchTab('batch')">
+                    <i class="fas fa-layer-group"></i> Batch Analysis
+                </button>
+            </div>
+
+            <!-- Single Analysis Tab -->
+            <div id="single-tab" class="tab-content active">
+                <div class="form-group">
+                    <label for="single-model" class="form-label">
+                        <i class="fas fa-cog"></i> Select Model
+                    </label>
+                    <select id="single-model" class="form-control form-select">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="single-text" class="form-label">
+                        <i class="fas fa-pencil-alt"></i> Enter Text
+                    </label>
+                    <div class="textarea-container">
+                        <textarea
+                            id="single-text"
+                            class="form-control"
+                            rows="6"
+                            placeholder="Type or paste your text here to analyze its sentiment..."
+                        ></textarea>
+                        <div id="single-word-count" class="word-counter">0 / 5000 words</div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button id="single-analyze" class="btn btn-primary">
+                        <i class="fas fa-search"></i> Analyze Sentiment
+                    </button>
+                    <button id="single-clear" class="btn btn-secondary">
+                        <i class="fas fa-trash"></i> Clear
+                    </button>
+                </div>
+
+                <div class="progress-container" id="single-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <p style="text-align: center; margin-top: 10px; color: #6c757d;">
+                        <i class="fas fa-spinner fa-spin"></i> Analyzing sentiment...
+                    </p>
+                </div>
+
+                <div id="single-result"></div>
+            </div>
+
+            <!-- Batch Analysis Tab -->
+            <div id="batch-tab" class="tab-content">
+                <div class="form-group">
+                    <label for="batch-model" class="form-label">
+                        <i class="fas fa-cog"></i> Select Model
+                    </label>
+                    <select id="batch-model" class="form-control form-select">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <i class="fas fa-upload"></i> Upload Files (CSV, TXT)
+                    </label>
+                    <div id="drag-area" class="drag-area">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                        <h3>Drag & Drop Files Here</h3>
+                        <p>or <strong>click to browse</strong></p>
+                        <p style="margin-top: 10px; color: #6c757d; font-size: 14px;">
+                            Supported formats: CSV, TXT
+                        </p>
+                        <input type="file" id="file-input" class="file-input" accept=".csv,.txt" multiple>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button id="batch-analyze" class="btn btn-primary">
+                        <i class="fas fa-play"></i> Start Batch Analysis
+                    </button>
+                    <button id="batch-clear" class="btn btn-secondary">
+                        <i class="fas fa-trash"></i> Clear Files
+                    </button>
+                </div>
+
+                <div class="progress-container" id="batch-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <p style="text-align: center; margin-top: 10px; color: #6c757d;">
+                        <i class="fas fa-spinner fa-spin"></i> Processing batch analysis...
+                    </p>
+                </div>
+
+                <div id="batch-result"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+    <script src="/static/js/script.js"></script>
+    
+    <!-- Add debug panel -->
+    <div id="debug-panel" style="position: fixed; bottom: 0; right: 0; background: rgba(0,0,0,0.8); color: white; padding: 10px; font-family: monospace; max-width: 400px; max-height: 200px; overflow: auto; z-index: 1000; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h4>Debug Console</h4>
+            <button onclick="toggleDebug()" style="background: none; border: none; color: white; cursor: pointer;">×</button>
+        </div>
+        <div id="debug-content"></div>
+    </div>
+    
+    <script>
+    // Debug helpers
+    let debugEnabled = false;
+    
+    function toggleDebug() {
+        debugEnabled = !debugEnabled;
+        document.getElementById('debug-panel').style.display = debugEnabled ? 'block' : 'none';
+    }
+    
+    // Press Ctrl+D to toggle debug
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+            e.preventDefault();
+            toggleDebug();
+        }
+    });
+    
+    // Override console.log for debug panel
+    const oldLog = console.log;
+    console.log = function(...args) {
+        oldLog.apply(console, args);
+        const debugContent = document.getElementById('debug-content');
+        if (debugContent) {
+            const message = args.map(arg => 
+                typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+            ).join(' ');
+            debugContent.innerHTML += `<div>${message}</div>`;
+            debugContent.scrollTop = debugContent.scrollHeight;
+        }
+    };
+    console.error = function(...args) {
+        oldLog.apply(console, args);
+        toggleDebug(); // Auto show debug on error
+        const debugContent = document.getElementById('debug-content');
+        if (debugContent) {
+            const message = args.map(arg => 
+                typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+            ).join(' ');
+            debugContent.innerHTML += `<div style="color: #ff6b6b;">${message}</div>`;
+            debugContent.scrollTop = debugContent.scrollHeight;
+        }
+    };
+    </script>
+</body>
+</html>
