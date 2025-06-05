@@ -2,7 +2,11 @@
 
 ## Overview
 
-This web application performs sentiment analysis on English text using Hugging Face's DistilBERT or TextBlob. It supports single text input and batch processing via CSV uploads, with confidence score visualizations using Chart.js.
+<div>
+    <img src="./img1.png" width="60%" height="50%">
+</div>
+
+This web application performs sentiment analysis on English text using Hugging Face's DistilBERT or RoBert-finetune. It supports single text input and batch processing via CSV uploads, with confidence score visualizations using Chart.js.
 
 ## Features
 
