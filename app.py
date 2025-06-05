@@ -11,23 +11,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import torch
 import string
 import logging
+from langdetect import detect, LangDetectException, DetectorFactory
+from functools import lru_cache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Optional: Enable CORS for local frontend development
-try:
-    from flask_cors import CORS
-
-    cors_available = True
-except ImportError:
-    cors_available = False
-    logger.warning("flask_cors not available. CORS is disabled.")
-
 app = Flask(__name__, static_folder='static', template_folder='templates')
-if cors_available:
-    CORS(app)
 
 output_dir = 'static/output'
 models_dir = 'scripts/models'
@@ -67,9 +57,114 @@ except Exception as e:
     roberta_model = None
     roberta_tokenizer = None
 
+try:
+    # mBERT multilingual model
+    m_bert_classifier = pipeline('sentiment-analysis',
+                               model='nlptown/bert-base-multilingual-uncased-sentiment',
+                               truncation=True, max_length=512)
+    logger.info("Successfully loaded mBERT multilingual model")
+except Exception as e:
+    logger.error(f"Error loading mBERT model: {str(e)}")
+    m_bert_classifier = None
+
+try:
+    # XLM-RoBERTa multilingual model
+    xlm_roberta_classifier = pipeline('sentiment-analysis',
+                                     model='xlm-roberta-base',
+                                     truncation=True, max_length=512)
+    logger.info("Successfully loaded XLM-RoBERTa multilingual model")
+except Exception as e:
+    logger.error(f"Error loading XLM-RoBERTa model: {str(e)}")
+    xlm_roberta_classifier = None
+
 # Define max_length
 max_length = 512
 
+LANGUAGE_MODELS = {
+    'vi': 'NlpHUST/vibert4news-sentiment',  # Vietnamese
+    'en': 'distilbert-base-uncased-finetuned-sst-2-english',  # English
+    'zh': 'uer/roberta-base-finetuned-jd-binary-chinese',  # Chinese
+}
+
+@lru_cache(maxsize=5)
+def get_language_model(language_code):
+    """Load a language-specific model on demand and cache it"""
+    model_name = LANGUAGE_MODELS.get(language_code)
+    if not model_name:
+        return None
+
+    try:
+        model = pipeline('sentiment-analysis', model=model_name, truncation=True, max_length=512)
+        logger.info(f"Loaded language-specific model for {language_code}: {model_name}")
+        return model
+    except Exception as e:
+        logger.error(f"Error loading model for {language_code}: {str(e)}")
+        return None
+
+def ensemble_prediction(text, language):
+    """Combine predictions from multiple models for better accuracy."""
+    predictions = []
+
+    # Get language code
+    lang_code = language.split('-')[0] if '-' in language else language
+
+    # 1. Language-specific model
+    lang_model = get_language_model(lang_code)
+    if lang_model:
+        try:
+            result = lang_model(text)[0]
+            pred = 'positive' if result['label'] in ['LABEL_1', 'positive', 'POSITIVE'] else 'negative'
+            conf = float(result['score'])
+            predictions.append({'model': f'lang-specific-{lang_code}', 'prediction': pred, 'confidence': conf * 1.2})
+        except Exception as e:
+            logger.error(f"Error with language-specific model: {str(e)}")
+
+    # 2. Multilingual model (mBERT)
+    if m_bert_classifier:
+        try:
+            result = m_bert_classifier(text)[0]
+            stars = int(result['label'].split()[0])
+            pred = 'positive' if stars > 3 else 'negative'
+            conf = float(result['score'])
+            predictions.append({'model': 'mbert', 'prediction': pred, 'confidence': conf})
+        except Exception as e:
+            logger.error(f"Error with mBERT: {str(e)}")
+    # XLM-RoBERTa multilingual model
+    if xlm_roberta_classifier:
+        try:
+            result = xlm_roberta_classifier(text)[0]
+            pred = 'positive' if result['label'] == 'POSITIVE' else 'negative'
+            predictions.append({
+                'model': 'xlm-roberta',
+                'prediction': pred,
+                'confidence': float(result['score']) * 1.1  # Higher weight for XLM-RoBERTa
+            })
+        except Exception as e:
+            logger.error(f"Error with XLM-RoBERTa: {str(e)}")
+
+    # 4. Fallback to default English model
+    if not predictions and hf_classifier:
+        try:
+            result = hf_classifier(text)[0]
+            pred = 'positive' if result['label'] == 'POSITIVE' else 'negative'
+            conf = float(result['score'])
+            predictions.append({'model': 'distilbert-fallback', 'prediction': pred, 'confidence': conf})
+        except Exception as e:
+            logger.error(f"Error with fallback model: {str(e)}")
+
+    # Aggregate predictions
+    if not predictions:
+        return None, None
+
+    pos_score = sum(p['confidence'] for p in predictions if p['prediction'] == 'positive')
+    neg_score = sum(p['confidence'] for p in predictions if p['prediction'] == 'negative')
+
+    final_prediction = 'positive' if pos_score > neg_score else 'negative'
+    total_confidence = pos_score + neg_score
+    norm_confidence = (pos_score / total_confidence) if final_prediction == 'positive' else (neg_score / total_confidence)
+
+    logger.info(f"Ensemble prediction: {final_prediction} with confidence {norm_confidence:.2f}")
+    return final_prediction, norm_confidence
 
 def preprocess_text(text):
     # Basic preprocessing: lowercase, remove punctuation, strip whitespace
@@ -90,13 +185,34 @@ def chunk_text(text, max_words=100, overlap=10):
 
     return chunks
 
+DetectorFactory.seed = 0
+
+
+# Add this function to detect language
+def detect_language(text):
+    """Detect the language of the input text."""
+    try:
+        if not text or len(text.strip()) < 3:
+            return "unknown"
+        return detect(text)
+    except LangDetectException:
+        return "unknown"
+
+
+# Update the analyze_long_text function to include language detection
+# Fix analyze_long_text function which is returning only 2 values but 3 are expected
 def analyze_long_text(text, model_name, max_chunk_words=100):
     """Process long text by chunking and aggregating results."""
     try:
+        # Detect language first
+        language = detect_language(text)
+        logger.info(f"Detected language: {language}")
+
         # First check if text is already within limits
         if count_words(text) <= 500 and estimate_tokens(text) <= 512:
             # Process normally if text is short enough
-            return predict_single_chunk(text, model_name)
+            prediction, confidence = predict_single_chunk(text, model_name)
+            return prediction, confidence, language
 
         # For longer texts, break into chunks
         chunks = chunk_text(text, max_words=max_chunk_words)
@@ -117,7 +233,7 @@ def analyze_long_text(text, model_name, max_chunk_words=100):
                 })
 
         if not results:
-            return None, None
+            return None, None, language
 
         # Aggregate results (weighted by confidence)
         pos_score = sum(r['confidence'] for r in results if r['prediction'] == 'positive')
@@ -128,21 +244,46 @@ def analyze_long_text(text, model_name, max_chunk_words=100):
         # Confidence is the average of chunk confidences
         avg_confidence = sum(r['confidence'] for r in results) / len(results)
 
-        return prediction, avg_confidence
+        return prediction, avg_confidence, language
 
     except Exception as e:
         logger.error(f"Error in analyze_long_text: {str(e)}")
-        return None, None
+        return None, None, "unknown"
 
-def predict_single_chunk(text, model_name):
+
+# Update the predict_single_chunk function to handle language
+def predict_single_chunk(text, model_name, language="en"):
     """Process a single text chunk with the selected model."""
     prediction = None
     confidence = None
 
+    # Log the language for debugging
+    logger.info(f"Processing text in language: {language}")
+
+    # Use ensemble prediction for multilingual model
+    if model_name == 'multilingual':
+        return ensemble_prediction(text, language)
+
+    # Default models
     if model_name == 'huggingface':
         if hf_classifier is None:
             return None, None
         result = hf_classifier(text)[0]
+        prediction = 'positive' if result['label'] == 'POSITIVE' else 'negative'
+        confidence = float(result['score'])
+
+    elif model_name == 'mbert':
+        if m_bert_classifier is None:
+            return None, None
+        result = m_bert_classifier(text)[0]
+        stars = int(result['label'].split()[0])
+        prediction = 'positive' if stars > 3 else 'negative'
+        confidence = float(result['score'])
+
+    elif model_name == 'xlm-roberta':
+        if xlm_roberta_classifier is None:
+            return None, None
+        result = xlm_roberta_classifier(text)[0]
         prediction = 'positive' if result['label'] == 'POSITIVE' else 'negative'
         confidence = float(result['score'])
 
@@ -156,6 +297,7 @@ def predict_single_chunk(text, model_name):
         prediction, confidence = predict_text(model_path, text)
 
     return prediction, confidence
+
 
 def predict_sentiment(text, model, tokenizer, device):
     if model is None or tokenizer is None:
@@ -274,12 +416,25 @@ def get_models():
 
     models = []
 
-    # Only add models that are available
+    # Add multilingual ensemble model as the first option
+    models.append({
+        'value': 'multilingual',
+        'display_name': 'Multilingual Ensemble (Recommended for Non-English)'
+    })
+
+    # Add individual multilingual models
+    if xlm_roberta_classifier is not None:
+        models.append({'value': 'xlm-roberta', 'display_name': 'XLM-RoBERTa (Best for Multilingual)'})
+
+    if m_bert_classifier is not None:
+        models.append({'value': 'mbert', 'display_name': 'mBERT (Multilingual Sentiment)'})
+
+    # Only add classic models that are available
     if hf_classifier is not None:
-        models.append({'value': 'huggingface', 'display_name': 'Hugging Face (DistilBERT)'})
+        models.append({'value': 'huggingface', 'display_name': 'DistilBERT (English)'})
 
     if roberta_model is not None and roberta_tokenizer is not None:
-        models.append({'value': 'roberta', 'display_name': 'RoBERTa (Finetuned)'})
+        models.append({'value': 'roberta', 'display_name': 'RoBERTa (English)'})
 
     for model_file in pkl_models:
         display_name = model_config.get(model_file, model_file.replace('.pkl', '').replace('_', ' ').title())
@@ -287,7 +442,6 @@ def get_models():
 
     logger.info(f"Available models: {[m['value'] for m in models]}")
     return jsonify(models)
-
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -309,16 +463,17 @@ def predict():
         if word_count > 5000:
             return jsonify({'error': 'Text too large (exceeds 5000 words)'}), 400
 
-        # Use new long text processing function
-        prediction, confidence = analyze_long_text(text, model_name)
+        # Use new long text processing function with language detection
+        prediction, confidence, language = analyze_long_text(text, model_name)
 
         if prediction is None:
             return jsonify({'error': f'Failed to predict with model: {model_name}'}), 500
 
-        # Return the prediction
+        # Return the prediction with language information
         response = make_response(jsonify({
             'prediction': prediction,
             'confidence': float(confidence),
+            'language': language,
             'processed': 'chunked' if word_count > 500 else 'direct'
         }))
         response.headers['Content-Type'] = 'application/json; charset=utf-8'
@@ -336,7 +491,7 @@ def batch_process():
             logger.error("No files found in request")
             return jsonify({'error': 'No files uploaded'}), 400
 
-        files = request.files.getlist('files[]')  # Get multiple files
+        files = request.files.getlist('files[]')
         if not files or len(files) == 0:
             return jsonify({'error': 'No valid files uploaded'}), 400
 
@@ -365,7 +520,6 @@ def batch_process():
             texts = []
             if file.filename.endswith('.csv'):
                 try:
-                    # Reset file pointer and read as CSV
                     file.seek(0)
                     df = pd.read_csv(file)
                     if 'text' not in df.columns:
@@ -376,24 +530,20 @@ def batch_process():
                     logger.error(f"Error reading CSV {file.filename}: {str(e)}")
                     continue
             else:
-                # TXT file processing
                 texts = [line.strip() for line in content.splitlines() if line.strip()]
 
             if not texts:
                 logger.warning(f"No valid texts found in file {file.filename}")
                 continue
 
-            # Process texts from this file
             file_results = []
             for text in texts:
-                # For very large texts (over 5000 words), skip
                 word_count = count_words(text)
                 if word_count > 5000:
                     logger.warning(f"Text exceeds 5000 words, skipping")
                     continue
 
-                # Use the long text processing function
-                prediction, confidence = analyze_long_text(text, model_name)
+                prediction, confidence, language = analyze_long_text(text, model_name)
 
                 if prediction is None:
                     continue
@@ -402,6 +552,7 @@ def batch_process():
                     'text': text,
                     'prediction': prediction,
                     'confidence': float(confidence),
+                    'language': language,
                     'filename': file.filename,
                     'processed': 'chunked' if word_count > 500 else 'direct'
                 })
@@ -414,10 +565,8 @@ def batch_process():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_file = os.path.join(output_dir, f'batch_results_{timestamp}.csv')
 
-        # Save to CSV
         pd.DataFrame(all_results).to_csv(output_file, index=False)
 
-        # Create response with results and download URL
         response = make_response(jsonify({
             'results': all_results,
             'download_url': f'/download/{os.path.basename(output_file)}'
